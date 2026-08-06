@@ -1,0 +1,5 @@
+*.o
+*.d
+preview_native
+.DS_Store
+.claude/
