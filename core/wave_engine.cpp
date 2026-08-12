@@ -166,6 +166,9 @@ FieldSample WaveEngine::sampleField(int x, int y) const {
     float gradX = 0.0f;
     float gradY = 0.0f;
 
+    constexpr float kSteepnessToSharpness = 2.0f;
+    constexpr float kMaxExtraSharpness = 2.5f;
+
     for (int i = 0; i < kComponentCount; ++i) {
         const WaveComponent& s = currentSpecs_[i];
         float k = 2.0f * kPi / std::max(s.wavelengthPx, 0.5f);
@@ -174,13 +177,30 @@ FieldSample WaveEngine::sampleField(int x, int y) const {
         float proj = static_cast<float>(x) * dirX + static_cast<float>(y) * dirY;
         float angle = k * proj - phase_[i];
 
-        height += s.amplitude * std::cos(angle);
+        // Gerstner-ish crest sharpening: true Gerstner waves also displace
+        // particles horizontally, which bunches crests narrow and spreads
+        // troughs wide -- there's no closed-form per-pixel inverse for that,
+        // so instead we reshape the raw cosine's symmetric crest/trough into
+        // that same peaked/broad asymmetry. u in [0,1]; raising it to a
+        // power > 1 compresses most of the cycle toward the trough and
+        // leaves a narrow spike at the crest, and steeper (shorter/taller)
+        // components get more of the effect, same as real wave steepness
+        // A*k governs how peaked a real trochoidal wave looks. sharpness==1
+        // degenerates back to plain cosine exactly.
+        float c = std::cos(angle);
+        float sn = std::sin(angle);
+        float u = (c + 1.0f) * 0.5f;
+        float steepness = s.amplitude * k;
+        float sharpness = 1.0f + std::min(steepness * kSteepnessToSharpness, kMaxExtraSharpness);
+        float shaped = 2.0f * std::pow(u, sharpness) - 1.0f;
 
-        // d(term)/d(proj) = -amplitude * k * sin(angle); chain-rule that
-        // through proj = x*dirX + y*dirY to get the analytical slope, which
-        // is what turns a flat height-to-colour map into something that can
-        // be lit like a surface instead of a heightmap.
-        float dTermDProj = -s.amplitude * k * std::sin(angle);
+        height += s.amplitude * shaped;
+
+        // d(shaped)/d(angle) = -sharpness * u^(sharpness-1) * sin(angle);
+        // chain-ruled the same way as the plain-cosine case through
+        // proj = x*dirX + y*dirY to keep the analytical slope for lighting.
+        float dShapedDAngle = -sharpness * std::pow(u, sharpness - 1.0f) * sn;
+        float dTermDProj = s.amplitude * dShapedDAngle * k;
         gradX += dTermDProj * dirX;
         gradY += dTermDProj * dirY;
     }
