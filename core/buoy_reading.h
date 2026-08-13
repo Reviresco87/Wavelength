@@ -2,11 +2,16 @@
 
 #include <cstdint>
 
+#include "wave_partition.h"
+
 namespace wave {
 
-// A single bulk-parameter buoy observation. Mirrors what CCO's wave buoys
-// report (or a mock stand-in for it): no directional spectrum, just the
-// summary statistics -- the engine synthesizes texture from these.
+// A sea-state reading. The bulk fields are always meaningful (a single
+// summary reading -- what CCO's buoys report, or a mock stand-in). The three
+// partitions are optional: present only when a source has real directionally-
+// resolved data (e.g. Copernicus's wind-sea/swell split). deriveComponents()
+// uses them directly when present and falls back to synthesizing texture
+// from the bulk fields alone when they're not.
 struct BuoyReading {
     int64_t timestampUnix = 0;
 
@@ -17,6 +22,10 @@ struct BuoyReading {
                               // oceanographic convention -- NOT the direction they're heading.
     float spreadDeg = 20.0f;  // directional spread; default used if a source doesn't supply one
     float seaTempC = 0.0f;
+
+    WavePartition windSea;
+    WavePartition primarySwell;
+    WavePartition secondarySwell;
 
     bool valid = false;
 };

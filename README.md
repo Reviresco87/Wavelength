@@ -1,8 +1,9 @@
 # Living Wave Artwork
 
 A physical artwork: an ESP32-S3 driving a 64×64 HUB75 LED matrix, rendering a top-down, continuously-alive sea-state
-animation from real UK buoy data. The buoy updates every so often; the display never stops moving — a small engine
-extrapolates and animates between readings so it always looks like a living sea, not a slideshow of stale snapshots.
+animation targeted at Mevagissey, Cornwall. Data updates every so often; the display never stops moving — a small
+engine extrapolates and animates between readings so it always looks like a living sea, not a slideshow of stale
+snapshots.
 
 ## Hardware
 
@@ -10,44 +11,74 @@ extrapolates and animates between readings so it always looks like a living sea,
 - seengreat 64×64 RGB HUB75 LED matrix panel
 - (later) Electrosmith Daisy Seed, for audio/sonification — deferred until the silent build is working
 
-## Data source
+## Data sources
 
-[Channel Coastal Observatory](https://coastalmonitoring.org/ccoresources/api/) API, buoy: **Looe Bay** (public viewer
-`chart=98`) — the nearest active CCO wave buoy to Mevagissey, on the same south Cornwall/Channel coast. Reports
-significant wave height, period, direction, and sea temperature from a Datawell Directional Waverider MkIII.
+Two real sources, blended, rather than one buoy standing in for a location it isn't actually at:
 
-The exact API `sensor=` identifier and property field names in the GeoJSON response are **not yet verified** — CCO's
-public docs don't spell out the response schema in enough detail to hardcode confidently. `data/cco_client` parses a
-GeoJSON wave observation into a `BuoyReading` using the vendored [ArduinoJson](https://arduinojson.org) (v7.4.3,
-`vendor/ArduinoJson.h`, works standalone on native and later on the ESP32 unchanged) — the GeoJSON *traversal* logic
-is written and tested against synthetic payloads, but the property key names it looks for (`Hs`, `Tp`,
-`MeanDirection`, `SpreadDirection`, `SeaTemperature`) are best-guesses, clearly flagged in `cco_client.h`. Requesting
-a free API key via CCO's developer form is a manual step only you can do; once you have one, sanity-check those field
-names against a real response before wiring `cco_client` into `main_native` (it isn't yet — the mock feed is still
-the default).
+- **[Copernicus Marine Service](https://data.marine.copernicus.eu/product/NWSHELF_ANALYSISFORECAST_WAV_004_014/description)**
+  — a coupled hydrodynamic-wave model over the UK shelf at 1.5km resolution, already assimilating satellites/physics
+  upstream. We read the single grid cell nearest Mevagissey (50.2705, -4.7827), including real **partitioned** wave
+  data (separate wind-sea, primary swell, secondary swell — each with its own height/period/direction), not just a
+  bulk number. This is what makes the piece actually targeted at Mevagissey rather than at wherever the nearest buoy
+  happens to be. Refreshes once daily (hourly time-steps within that run) — spatially precise, not continuously live.
+- **[Channel Coastal Observatory](https://coastalmonitoring.org/ccoresources/api/)**, buoy **Looe Bay** — the nearest
+  active CCO wave buoy to Mevagissey (~27km away; a real gap in network coverage, not a mistake — verified against
+  CCO's own live feed). Real ~30min-cadence buoy data corrects the *amplitude* of Copernicus's wave-train structure
+  in real time, the way a local anchor buoy corrects a model in real data-assimilation pipelines, just sized for a
+  hobby project. Significant wave heights combine as `sqrt(sum of squares)` across partitions, not linearly.
+
+Both are fetched and blended by a small scheduled job (`cloud/fetch_and_blend.py`, see below), not by the ESP32
+directly — the device only ever polls one small JSON payload.
+
+**CCO field names are confirmed**, not guessed — pulled from a real live response this session (via the same endpoint
+`coastalmonitoring.org`'s own public map uses): `hs`, `tp`, `pdir`, `spread`, `sst`, `sensor`. One real quirk: CCO
+serializes numbers as JSON *strings* (`"hs":"0.670"`), which `data/cco_client.cpp` and `cloud/fetch_and_blend.py`
+both account for. `cco_client` also needs the target sensor name (the feed returns every CCO site nationally in one
+FeatureCollection) — confirmed working against live data for both Looe Bay and other sites.
+
+**Copernicus's exact variable codes for partition periods/directions are best-effort**, not individually confirmed
+(the bulk/height codes are; the convention-inferred ones are flagged in `cloud/fetch_and_blend.py` — verify against
+a real response the first time this runs with credentials).
+
+**Known outstanding issue**: the CCO API key currently returns `403 Referer does not match the key` even when sent
+with the exact registered domain (`wavelength-artwork.local`) as a properly-formed Referer header — verified this
+isn't a client-side formatting problem (tested via both a browser and Python `requests`, with a correctly-parsed
+Referer confirmed in the error response itself). Worth checking the key's actual registered domain in CCO's system
+before relying on it.
+
+## Local weather (investigated, deferred)
+
+Not useful for wave *physics* — Copernicus's wind-sea partition already correctly derives chop from wind within a
+coupled model, so re-deriving it from raw wind data would be redundant and cruder. Could be a genuine small
+*aesthetic* win later: live cloud cover modulating specular/sparkle strength (sunny vs overcast glint character), or
+wind speed nudging fine noise/chop intensity — both already exist as tunable constants in `core/palette.cpp` and
+`core/wave_engine.cpp`. [Open-Meteo](https://open-meteo.com/) (free, no key, no signup) is the natural source if this
+gets picked up later.
 
 ## Project phases
 
-- **Phase A (current)** — hardware-agnostic engine + terminal preview. No hardware required. Everything in `core/`
-  ships into the firmware unchanged later; only the transport and render targets change.
+- **Phase A (current)** — hardware-agnostic engine + terminal preview + live cloud data. No hardware required.
+  Everything in `core/` ships into the firmware unchanged later; only the transport and render targets change.
 - **Phase B** — once hardware arrives: PlatformIO ESP32-S3 target, HUB75 render via
-  [ESP32-HUB75-MatrixPanel-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA), real CCO fetch over
-  WiFi/HTTPS, pin mapping against the actual board.
+  [ESP32-HUB75-MatrixPanel-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA), the device fetches the
+  same published JSON payload `main_native --live-url` already consumes, pin mapping against the actual board.
 - **Phase C (later)** — Daisy Seed audio, fed from the same `WaveEngine` state over a serial link.
 
 ## Layout
 
 ```
 core/      hardware-agnostic wave engine (shared by preview today and firmware later)
-data/      buoy data sources: mock feed (default, used by preview) and cco_client (pending field-name verification)
-preview/   native desktop target: terminal ANSI true-colour renderer + main loop
-vendor/    ArduinoJson.h, vendored single header (MIT), used by cco_client
+data/      mock feed, cco_client (raw CCO GeoJSON), live_feed_client (our own blended-JSON schema)
+cloud/     fetch_and_blend.py -- scheduled job: Copernicus + Looe Bay -> one blended JSON payload
+.github/   workflow that runs cloud/ on a schedule and publishes to a data branch
+preview/   native desktop target: terminal ANSI true-colour renderer + main loop, incl. --live-url
+vendor/    ArduinoJson.h, vendored single header (MIT), used by cco_client and live_feed_client
 firmware/  empty until Phase B
 ```
 
 ## Building the preview
 
-No installs required beyond Xcode Command Line Tools (`clang++`).
+No installs required beyond Xcode Command Line Tools (`clang++`) and system `libcurl` (already present on macOS).
 
 ```
 make
@@ -55,23 +86,50 @@ make
 ```
 
 Widen your terminal to ~130 columns for a clean square-ish render. Runs against the mock buoy feed by default —
-a short, illustrative (not verified-historical) sequence of Looe-Bay-plausible readings on a compressed ~45s
-cadence, deliberately swinging direction across the 350°→10° wrap and eventually running dry so you can watch
-the engine lose confidence and drift. Ctrl+C to quit.
+a short, illustrative (not verified-historical) sequence of readings on a compressed ~45s cadence, deliberately
+swinging direction across the 350°→10° wrap and eventually running dry so you can watch the engine lose confidence
+and drift. Ctrl+C to quit.
 
 ```
-./preview_native --stats                # headless: prints eased state + confidence each tick instead of rendering
-./preview_native --interval 20          # change the mock feed's cadence (seconds)
+./preview_native --stats                             # headless: prints eased state + confidence each tick
+./preview_native --interval 20                        # change the mock feed's cadence (seconds)
+./preview_native --live-url <url> [--live-poll-interval 60]   # poll a published blended-JSON payload instead of the mock feed
 ```
+
+`--live-url` is how the real Copernicus+Looe Bay blend gets seen and judged before any ESP32 hardware exists —
+point it at the raw URL of whatever `cloud/fetch_and_blend.py` publishes.
+
+## Cloud data layer
+
+`cloud/fetch_and_blend.py` needs three secrets (GitHub Actions repo secrets when running via
+`.github/workflows/fetch-wave-data.yml`; a gitignored `cloud/.env` for local testing): `CCO_API_KEY`,
+`COPERNICUSMARINE_SERVICE_USERNAME`, `COPERNICUSMARINE_SERVICE_PASSWORD` (a free account at marine.copernicus.eu —
+self-service, not something that can be created on your behalf). The workflow runs every 30 minutes and commits the
+output JSON to a `data` branch; it's inert until this repo is actually pushed to GitHub.
 
 ## Engine design (the "living" part)
 
 `WaveEngine` (`core/wave_engine.h`) holds a `prevState`/`targetState` pair. Each new reading starts a ~20s eased
 transition (direction eased via shortest-arc circular interpolation, not linear, to avoid spinning the wrong way
-across 0°/360°). Between readings, a small fixed set of directional sinusoidal wave components (one primary from
-the reported height/period/direction, plus secondaries jittered across the reported directional spread) keep
-advancing phase continuously in real time, layered with two octaves of Perlin noise for organic texture. If updates
+across 0°/360°). Between readings, wave-component phases keep advancing continuously in real time regardless of when
+the next update arrives — that continuous motion, not the update itself, is what makes it look alive. If updates
 stop arriving, confidence decays and noise/desaturation grows — the piece reads as "losing certainty," not frozen.
+
+**Wave components**: when a reading carries real partitions (Copernicus), `deriveComponents` builds components
+directly from each real wave train (its own real direction/period/amplitude) rather than faking directionality —
+`core/wave_partition.h`. When it doesn't (mock feed, bulk-only CCO fallback), it falls back to synthesizing a primary
+plus jittered secondaries from one bulk reading's spread — the original Phase A approach, unchanged and still exact.
+
+**Shading**: colour comes from fake Blinn-Phong lighting off the wave field's *analytical slope* (`core/palette.cpp`)
+against a fixed light direction, not a flat height-to-colour ramp — that's what makes it read as glinting water
+rather than a heightmap. Foam is thresholded and steepness/noise-roughened, not a smooth gradient to white. A sparse
+fast-noise sparkle layer adds sun-glitter, gated to only show on already-lit facets.
+
+**Wave shape**: each component's raw cosine is reshaped into a peaked-crest/broad-trough asymmetry (Gerstner-ish,
+`sampleField` in `core/wave_engine.cpp`) rather than a symmetric sine — steeper components (`amplitude × wavenumber`)
+get more of the effect, matching how real wave steepness governs trochoidal peaking. An approximation of true
+Gerstner horizontal displacement, not the real thing (no closed-form per-pixel inverse exists for that) — but the
+analytical gradient is exact for whatever shape is actually rendered, so lighting stays correct.
 
 Wavelength on screen is an artistic rescale of the real deep-water dispersion relation (`λ ≈ 1.56·T²`), not a literal
 metres-per-pixel mapping — a real 100m+ swell wavelength can't fit a 64px panel, so period maps onto a chosen

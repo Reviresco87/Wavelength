@@ -35,6 +35,7 @@ public:
     bool hasData() const { return everIngested_; }
     float confidence() const { return confidence_; }
     const BuoyReading& currentState() const { return current_; }
+    const std::array<WaveComponent, kComponentCount>& currentComponents() const { return currentSpecs_; }
     double secondsSinceLastUpdate(double nowSeconds) const { return nowSeconds - lastIngestTime_; }
 
 private:

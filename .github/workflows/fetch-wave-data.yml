@@ -1,0 +1,60 @@
+name: Fetch and publish wave data
+
+# Requires three repo secrets before this can run successfully:
+#   CCO_API_KEY
+#   COPERNICUSMARINE_SERVICE_USERNAME
+#   COPERNICUSMARINE_SERVICE_PASSWORD
+# (Settings -> Secrets and variables -> Actions). This workflow is inert
+# until the repo is pushed to GitHub -- not activated as of this commit.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *" # matches Looe Bay's real update cadence
+  workflow_dispatch: {} # allows a manual run for testing
+
+permissions:
+  contents: write # needed to push the output JSON to the data branch
+
+jobs:
+  fetch-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r cloud/requirements.txt
+
+      - name: Fetch and blend Copernicus + Looe Bay
+        env:
+          CCO_API_KEY: ${{ secrets.CCO_API_KEY }}
+          COPERNICUSMARINE_SERVICE_USERNAME: ${{ secrets.COPERNICUSMARINE_SERVICE_USERNAME }}
+          COPERNICUSMARINE_SERVICE_PASSWORD: ${{ secrets.COPERNICUSMARINE_SERVICE_PASSWORD }}
+          OUTPUT_PATH: ${{ runner.temp }}/latest.json
+        run: python cloud/fetch_and_blend.py
+
+      - name: Publish to the data branch
+        run: |
+          git config user.name "wavelength-data-bot"
+          git config user.email "actions@users.noreply.github.com"
+
+          git fetch origin data || true
+          if git show-ref --verify --quiet refs/remotes/origin/data; then
+            git checkout -B data origin/data
+          else
+            git checkout --orphan data
+          fi
+
+          # Orphan/existing data branch may still have main's tree checked
+          # out -- keep only the fresh output file.
+          git rm -rf . > /dev/null 2>&1 || true
+          cp "${{ runner.temp }}/latest.json" latest.json
+
+          git add latest.json
+          git commit -m "Update wave data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push origin data

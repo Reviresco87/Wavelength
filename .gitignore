@@ -3,3 +3,10 @@
 preview_native
 .DS_Store
 .claude/
+.env
+cloud/.env
+cloud/__pycache__/
+cloud/*.pyc
+test_gerstner_shape
+test_cco_client
+.preview-serve/

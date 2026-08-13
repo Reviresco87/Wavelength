@@ -9,20 +9,21 @@ namespace wave {
 // Parses a Channel Coastal Observatory (coastalmonitoring.org) wave
 // observation GeoJSON response into a BuoyReading.
 //
-// IMPORTANT: the property field-name mapping in cco_client.cpp is
-// UNVERIFIED. CCO's public API docs don't spell out the response schema in
-// enough detail to confirm exact key names, so the `kField*` constants
-// there are best-guesses based on common wave-buoy naming conventions.
-// Confirm against a real response (once a CCO API key exists -- see the
-// README's "Data source" section) and fix those constants before relying
-// on this for real data. Not wired into preview/main_native.cpp yet for
-// that reason; the mock feed remains the default data source for now.
+// Field names below were confirmed against a real live response pulled this
+// session (via the exact endpoint coastalmonitoring.org's own public map
+// uses), not guessed -- including a non-obvious quirk: CCO serializes its
+// numeric values as JSON strings (e.g. "hs":"0.670"), not JSON numbers,
+// which parseObservation's implementation accounts for. The
+// `/latest.geojson` feed returns every CCO wave site nationally in one
+// FeatureCollection, so parseObservation needs the target sensor's name to
+// pick the right feature out of it.
 class CcoClient {
 public:
-    // Parses a single-feature (or first-feature-of-a-collection) GeoJSON
-    // wave observation. Returns a BuoyReading with valid=false on any
-    // parse failure or missing core field.
-    static BuoyReading parseObservation(const std::string& geoJson);
+    // Finds the feature whose "sensor" property equals `sensorName` and
+    // parses it. Returns a BuoyReading with valid=false if that sensor isn't
+    // present in this response, the JSON is malformed, or a core field is
+    // missing (e.g. that site reported no data this cycle).
+    static BuoyReading parseObservation(const std::string& geoJson, const std::string& sensorName);
 };
 
 } // namespace wave

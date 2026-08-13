@@ -1,22 +1,66 @@
 #include "cco_client.h"
 
+#include <cstdlib>
+
 #include "../vendor/ArduinoJson.h"
 
 namespace wave {
 
 namespace {
 
-// UNVERIFIED property key names -- see the warning in cco_client.h. Update
-// these once a real CCO response has actually been inspected.
-constexpr const char* kFieldHs = "Hs";
-constexpr const char* kFieldTp = "Tp";
-constexpr const char* kFieldMeanDirection = "MeanDirection";
-constexpr const char* kFieldSpread = "SpreadDirection";
-constexpr const char* kFieldSeaTemp = "SeaTemperature";
+// Confirmed against a real live coastalmonitoring.org response this
+// session -- not guessed. Note: CCO serializes these values as JSON
+// STRINGS (e.g. "hs":"0.670"), not JSON numbers -- tryParseFloatField
+// below handles that, and tolerates a real JSON number too in case that
+// ever changes.
+constexpr const char* kFieldSensor = "sensor";
+constexpr const char* kFieldHs = "hs";
+constexpr const char* kFieldTp = "tp";
+constexpr const char* kFieldDirection = "pdir";
+constexpr const char* kFieldSpread = "spread";
+constexpr const char* kFieldSeaTemp = "sst";
+
+bool tryParseFloatField(JsonVariantConst obj, const char* field, float& out) {
+    JsonVariantConst v = obj[field];
+    if (v.is<const char*>()) {
+        const char* s = v.as<const char*>();
+        char* end = nullptr;
+        float val = std::strtof(s, &end);
+        if (end == s) return false; // string present but not numeric (e.g. empty)
+        out = val;
+        return true;
+    }
+    if (v.is<float>()) {
+        out = v.as<float>();
+        return true;
+    }
+    return false; // absent, null, or some other type
+}
+
+// The /latest.geojson feed returns every CCO wave site nationally in one
+// FeatureCollection, not just the one we care about -- find the feature
+// whose "sensor" property matches.
+JsonVariantConst findSensorProperties(JsonDocument& doc, const std::string& sensorName) {
+    if (doc["features"].is<JsonArrayConst>()) {
+        for (JsonVariantConst feature : doc["features"].as<JsonArrayConst>()) {
+            JsonVariantConst props = feature["properties"];
+            if (props[kFieldSensor].is<const char*>() && sensorName == props[kFieldSensor].as<const char*>()) {
+                return props;
+            }
+        }
+    } else if (doc["properties"].is<JsonObjectConst>()) {
+        // Tolerate a single bare Feature too (no FeatureCollection wrapper).
+        JsonVariantConst props = doc["properties"];
+        if (props[kFieldSensor].is<const char*>() && sensorName == props[kFieldSensor].as<const char*>()) {
+            return props;
+        }
+    }
+    return JsonVariantConst();
+}
 
 } // namespace
 
-BuoyReading CcoClient::parseObservation(const std::string& geoJson) {
+BuoyReading CcoClient::parseObservation(const std::string& geoJson, const std::string& sensorName) {
     BuoyReading reading;
 
     JsonDocument doc;
@@ -24,35 +68,31 @@ BuoyReading CcoClient::parseObservation(const std::string& geoJson) {
         return reading; // valid stays false
     }
 
-    JsonVariantConst properties;
-    if (doc["features"].is<JsonArrayConst>() && doc["features"].size() > 0) {
-        properties = doc["features"][0]["properties"];
-    } else if (doc["properties"].is<JsonObjectConst>()) {
-        properties = doc["properties"]; // tolerate a single bare Feature too
-    }
-
+    JsonVariantConst properties = findSensorProperties(doc, sensorName);
     if (properties.isNull()) {
-        return reading;
+        return reading; // sensor not present in this response
     }
 
-    if (!properties[kFieldHs].is<float>() || !properties[kFieldTp].is<float>() ||
-        !properties[kFieldMeanDirection].is<float>()) {
-        return reading; // core fields missing: unparseable/unexpected payload shape
+    float hs = 0.0f, tp = 0.0f, dir = 0.0f;
+    if (!tryParseFloatField(properties, kFieldHs, hs) || !tryParseFloatField(properties, kFieldTp, tp) ||
+        !tryParseFloatField(properties, kFieldDirection, dir)) {
+        return reading; // core fields missing/null -- that site reported no data this cycle
     }
+    reading.hsMetres = hs;
+    reading.tpSeconds = tp;
+    reading.mwdDeg = dir;
 
-    reading.hsMetres = properties[kFieldHs].as<float>();
-    reading.tpSeconds = properties[kFieldTp].as<float>();
-    reading.mwdDeg = properties[kFieldMeanDirection].as<float>();
-
-    if (properties[kFieldSpread].is<float>()) {
-        reading.spreadDeg = properties[kFieldSpread].as<float>();
+    float spread = 0.0f;
+    if (tryParseFloatField(properties, kFieldSpread, spread)) {
+        reading.spreadDeg = spread;
     }
-    if (properties[kFieldSeaTemp].is<float>()) {
-        reading.seaTempC = properties[kFieldSeaTemp].as<float>();
+    float seaTemp = 0.0f;
+    if (tryParseFloatField(properties, kFieldSeaTemp, seaTemp)) {
+        reading.seaTempC = seaTemp;
     }
     // Timestamp intentionally left to the caller (e.g. stamp with receipt
-    // time) -- CCO's DateTime string format hasn't been confirmed either,
-    // not worth guessing a parser for a format we haven't actually seen.
+    // time) -- CCO's date field (YYYYMMDD#HHMMSS) isn't a standard format
+    // worth writing a bespoke parser for here.
 
     reading.valid = true;
     return reading;

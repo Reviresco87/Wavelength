@@ -84,6 +84,20 @@ WaveComponent blendSpec(const WaveComponent& a, const WaveComponent& b, float t)
     return s;
 }
 
+// Builds one component directly from a real, physically-distinct wave train
+// (e.g. Copernicus's primary swell or wind-sea partition) -- no jitter, this
+// train's own reported height/period/direction are used as-is.
+WaveComponent componentFromPartition(const WavePartition& p) {
+    WaveComponent c;
+    float periodS = std::max(0.5f, p.tpSeconds);
+    float travelBearingDeg = std::fmod(p.dirDeg + 180.0f + 360.0f, 360.0f);
+    c.amplitude = p.hsMetres * kArtisticAmplitudeScale;
+    c.wavelengthPx = wavelengthFromPeriod(periodS);
+    c.directionRad = travelBearingDeg * kDegToRad;
+    c.angularFreq = 2.0f * kPi / periodS;
+    return c;
+}
+
 } // namespace
 
 WaveEngine::WaveEngine(double expectedUpdateIntervalSeconds)
@@ -91,20 +105,68 @@ WaveEngine::WaveEngine(double expectedUpdateIntervalSeconds)
 
 std::array<WaveComponent, kComponentCount> WaveEngine::deriveComponents(const BuoyReading& reading) {
     std::array<WaveComponent, kComponentCount> specs{};
-    float baseAmplitude = reading.hsMetres * kArtisticAmplitudeScale;
 
-    // MWD is the direction waves come FROM; they propagate the reciprocal way.
-    float travelBearingDeg = std::fmod(reading.mwdDeg + 180.0f + 360.0f, 360.0f);
-
-    for (int i = 0; i < kComponentCount; ++i) {
-        float dirDeg = std::fmod(travelBearingDeg + kSpreadFractions[i] * reading.spreadDeg + 360.0f, 360.0f);
-        float periodS = std::max(0.5f, reading.tpSeconds * kPeriodJitter[i]);
-
-        specs[i].amplitude = baseAmplitude * (kAmplitudeWeights[i] / kWeightSum);
-        specs[i].wavelengthPx = wavelengthFromPeriod(periodS);
-        specs[i].directionRad = dirDeg * kDegToRad;
-        specs[i].angularFreq = 2.0f * kPi / periodS;
+    const WavePartition* candidates[3] = {&reading.primarySwell, &reading.secondarySwell, &reading.windSea};
+    const WavePartition* present[3] = {};
+    int presentCount = 0;
+    for (const WavePartition* p : candidates) {
+        if (p->present) present[presentCount++] = p;
     }
+
+    if (presentCount == 0) {
+        // Bulk-only fallback (mock feed, or a source without real spectral
+        // partitions): exactly the original spread-jitter derivation from a
+        // single bulk reading -- unchanged, so existing verified transition/
+        // wrap/staleness behaviour carries over with zero regression risk.
+        float baseAmplitude = reading.hsMetres * kArtisticAmplitudeScale;
+        float travelBearingDeg = std::fmod(reading.mwdDeg + 180.0f + 360.0f, 360.0f);
+        for (int i = 0; i < kComponentCount; ++i) {
+            float dirDeg = std::fmod(travelBearingDeg + kSpreadFractions[i] * reading.spreadDeg + 360.0f, 360.0f);
+            float periodS = std::max(0.5f, reading.tpSeconds * kPeriodJitter[i]);
+            specs[i].amplitude = baseAmplitude * (kAmplitudeWeights[i] / kWeightSum);
+            specs[i].wavelengthPx = wavelengthFromPeriod(periodS);
+            specs[i].directionRad = dirDeg * kDegToRad;
+            specs[i].angularFreq = 2.0f * kPi / periodS;
+        }
+        return specs;
+    }
+
+    // Real partitioned data: one component slot per real wave train, taken
+    // directly rather than jittered -- we're no longer faking directionality
+    // we now genuinely have.
+    int slot = 0;
+    for (int i = 0; i < presentCount && slot < kComponentCount; ++i, ++slot) {
+        specs[slot] = componentFromPartition(*present[i]);
+    }
+
+    // Fill any remaining slots with small texture-only jitter around the
+    // dominant (largest Hs) real train -- same trick the bulk path uses,
+    // just kept subtle (1/4 amplitude) since it's texture on top of real
+    // data, not standing in for missing directional information.
+    if (slot < kComponentCount) {
+        const WavePartition* dominant = present[0];
+        for (int i = 1; i < presentCount; ++i) {
+            if (present[i]->hsMetres > dominant->hsMetres) dominant = present[i];
+        }
+        float dominantTravelBearingDeg = std::fmod(dominant->dirDeg + 180.0f + 360.0f, 360.0f);
+        float dominantAmplitude = dominant->hsMetres * kArtisticAmplitudeScale;
+
+        constexpr float kTextureJitterDirDeg[] = {12.0f, -12.0f, 22.0f, -22.0f};
+        constexpr float kTextureJitterPeriodMul[] = {1.07f, 0.94f, 1.13f, 0.89f};
+        int j = 0;
+        while (slot < kComponentCount) {
+            int ji = j % 4;
+            float dirDeg = std::fmod(dominantTravelBearingDeg + kTextureJitterDirDeg[ji] + 360.0f, 360.0f);
+            float periodS = std::max(0.5f, dominant->tpSeconds * kTextureJitterPeriodMul[ji]);
+            specs[slot].amplitude = dominantAmplitude * 0.25f;
+            specs[slot].wavelengthPx = wavelengthFromPeriod(periodS);
+            specs[slot].directionRad = dirDeg * kDegToRad;
+            specs[slot].angularFreq = 2.0f * kPi / periodS;
+            ++slot;
+            ++j;
+        }
+    }
+
     return specs;
 }
 
