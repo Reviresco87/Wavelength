@@ -2,7 +2,7 @@ CXX ?= clang++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -MMD -MP
 LDLIBS ?= -lcurl
 
-CORE_SRCS := core/noise.cpp core/palette.cpp core/wave_engine.cpp
+CORE_SRCS := core/noise.cpp core/palette.cpp core/wave_engine.cpp core/sun_position.cpp core/sky_state.cpp
 DATA_SRCS := data/mock_buoy_feed.cpp data/cco_client.cpp data/live_feed_client.cpp
 PREVIEW_SRCS := preview/main_native.cpp preview/terminal_renderer.cpp
 

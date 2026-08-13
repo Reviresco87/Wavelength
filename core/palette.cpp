@@ -46,20 +46,27 @@ RGB8 addWhite(const RGB8& c, float amount) {
     return RGB8{clampByte(c.r + add), clampByte(c.g + add), clampByte(c.b + add)};
 }
 
-// Fixed artistic light direction: upper-left, mostly overhead (an overcast
-// sky / high sun). Unit vector, precomputed from raw (0.4, -0.6, 0.8).
-constexpr float kLightX = 0.3714f;
-constexpr float kLightY = -0.5571f;
-constexpr float kLightZ = 0.7428f;
+// Tints toward gold/orange proportional to sky.warmth, scaling existing
+// channels rather than blending toward a fixed warm colour -- preserves
+// the underlying wave detail instead of washing it out.
+constexpr float kWarmthRedBoost = 0.35f;
+constexpr float kWarmthGreenBoost = 0.12f;
+constexpr float kWarmthBlueCut = 0.35f;
 
-// Half-vector between the light and a straight-up view direction (this is a
-// top-down orthographic render, so view = (0,0,1)) -- Blinn-Phong specular.
-// Unit vector, precomputed from (light + view).
-constexpr float kHalfX = 0.1989f;
-constexpr float kHalfY = -0.2984f;
-constexpr float kHalfZ = 0.9334f;
+RGB8 applyWarmth(const RGB8& c, float warmth) {
+    float w = clamp01(warmth);
+    return RGB8{
+        clampByte(c.r * (1.0f + w * kWarmthRedBoost)),
+        clampByte(c.g * (1.0f + w * kWarmthGreenBoost)),
+        clampByte(c.b * (1.0f - w * kWarmthBlueCut)),
+    };
+}
 
-constexpr float kNormalStrength = 3.2f;  // how steep the artistic slopes read
+// How steep the artistic slopes read, how tightly the specular highlight
+// clings to the light direction, and how much the diffuse term contributes
+// -- the *character* of the shading model, not "where's the light right
+// now", so these stay fixed even though the light itself no longer is.
+constexpr float kNormalStrength = 3.2f;
 constexpr float kAmbient = 0.55f;
 constexpr float kDiffuseStrength = 0.6f;
 constexpr float kShininess = 24.0f;
@@ -68,7 +75,7 @@ constexpr float kSparkleStrength = 0.55f;
 
 } // namespace
 
-RGB8 colorize(const FieldSample& sample, float confidence) {
+RGB8 colorize(const FieldSample& sample, float confidence, const SkyState& sky) {
     // --- base colour from height ---
     float t = clamp01((sample.height + 1.2f) / 2.4f);
     int i = 0;
@@ -76,7 +83,7 @@ RGB8 colorize(const FieldSample& sample, float confidence) {
     float localT = clamp01((t - kStops[i].t) / (kStops[i + 1].t - kStops[i].t));
     RGB8 base = lerpColor(kStops[i].color, kStops[i + 1].color, localT);
 
-    // --- fake lighting: height-field normal against a fixed artistic light ---
+    // --- fake lighting: height-field normal against the sky's real light direction ---
     float nx = -sample.gradX * kNormalStrength;
     float ny = -sample.gradY * kNormalStrength;
     float nz = 1.0f;
@@ -85,12 +92,14 @@ RGB8 colorize(const FieldSample& sample, float confidence) {
     ny *= invLen;
     nz *= invLen;
 
-    float diffuse = std::max(0.0f, nx * kLightX + ny * kLightY + nz * kLightZ);
-    float specDot = std::max(0.0f, nx * kHalfX + ny * kHalfY + nz * kHalfZ);
+    float diffuse = std::max(0.0f, nx * sky.lightDirX + ny * sky.lightDirY + nz * sky.lightDirZ);
+    float specDot = std::max(0.0f, nx * sky.halfDirX + ny * sky.halfDirY + nz * sky.halfDirZ);
     float specular = std::pow(specDot, kShininess);
 
-    RGB8 c = scaleColor(base, kAmbient + diffuse * kDiffuseStrength);
-    c = addWhite(c, specular * kSpecularStrength);
+    // Ambient and diffuse both scale with overall sky brightness -- night
+    // dims everything, not just the glint.
+    RGB8 c = scaleColor(base, (kAmbient + diffuse * kDiffuseStrength) * sky.brightnessScale);
+    c = addWhite(c, specular * kSpecularStrength * sky.glintScale);
 
     // --- foam: irregular, thresholded, not a smooth gradient to white ---
     if (sample.foamAmount > 0.0f) {
@@ -99,7 +108,10 @@ RGB8 colorize(const FieldSample& sample, float confidence) {
 
     // --- sparkle: fine twinkle, gated so it only shows on already-lit facets ---
     float sparkleGate = clamp01(diffuse + specular);
-    c = addWhite(c, sample.sparkle * sparkleGate * kSparkleStrength);
+    c = addWhite(c, sample.sparkle * sparkleGate * kSparkleStrength * sky.glintScale);
+
+    // --- warmth: dawn/dusk gold, cool at midday, cool-dark at night ---
+    c = applyWarmth(c, sky.warmth);
 
     // --- confidence: desaturate toward neutral steel-blue-grey when stale ---
     float conf = clamp01(confidence);

@@ -46,14 +46,14 @@ isn't a client-side formatting problem (tested via both a browser and Python `re
 Referer confirmed in the error response itself). Worth checking the key's actual registered domain in CCO's system
 before relying on it.
 
-## Local weather (investigated, deferred)
+## Local weather
 
-Not useful for wave *physics* — Copernicus's wind-sea partition already correctly derives chop from wind within a
-coupled model, so re-deriving it from raw wind data would be redundant and cruder. Could be a genuine small
-*aesthetic* win later: live cloud cover modulating specular/sparkle strength (sunny vs overcast glint character), or
-wind speed nudging fine noise/chop intensity — both already exist as tunable constants in `core/palette.cpp` and
-`core/wave_engine.cpp`. [Open-Meteo](https://open-meteo.com/) (free, no key, no signup) is the natural source if this
-gets picked up later.
+Not used for wave *physics* — Copernicus's wind-sea partition already correctly derives chop from wind within a
+coupled model, so re-deriving it from raw wind data would be redundant and cruder. It *is* used for lighting: live
+cloud cover from [Open-Meteo](https://open-meteo.com/) (free, no key, no signup — verified endpoint in
+`cloud/fetch_and_blend.py`) dulls the specular glint and flattens brightness on overcast days, on top of the
+sun-position lighting described below. Wind speed nudging fine noise/chop intensity was considered too but not
+built — a real future option, not forgotten scope.
 
 ## Project phases
 
@@ -68,6 +68,7 @@ gets picked up later.
 
 ```
 core/      hardware-agnostic wave engine (shared by preview today and firmware later)
+           incl. sun_position.{h,cpp} (solar elevation/azimuth, pure math) and sky_state.{h,cpp} (per-tick lighting)
 data/      mock feed, cco_client (raw CCO GeoJSON), live_feed_client (our own blended-JSON schema)
 cloud/     fetch_and_blend.py -- scheduled job: Copernicus + Looe Bay -> one blended JSON payload
 .github/   workflow that runs cloud/ on a schedule and publishes to a data branch
@@ -94,6 +95,8 @@ and drift. Ctrl+C to quit.
 ./preview_native --stats                             # headless: prints eased state + confidence each tick
 ./preview_native --interval 20                        # change the mock feed's cadence (seconds)
 ./preview_native --live-url <url> [--live-poll-interval 60]   # poll a published blended-JSON payload instead of the mock feed
+./preview_native --sim-time 2026-08-13T05:30:00Z      # override the wall clock used for sun position (dawn/day/dusk/night, testable on demand)
+./preview_native --cloud-cover 100                    # force cloud cover regardless of the feed, to test overcast dulling
 ```
 
 `--live-url` is how the real Copernicus+Looe Bay blend gets seen and judged before any ESP32 hardware exists —
@@ -120,10 +123,19 @@ directly from each real wave train (its own real direction/period/amplitude) rat
 `core/wave_partition.h`. When it doesn't (mock feed, bulk-only CCO fallback), it falls back to synthesizing a primary
 plus jittered secondaries from one bulk reading's spread — the original Phase A approach, unchanged and still exact.
 
-**Shading**: colour comes from fake Blinn-Phong lighting off the wave field's *analytical slope* (`core/palette.cpp`)
-against a fixed light direction, not a flat height-to-colour ramp — that's what makes it read as glinting water
-rather than a heightmap. Foam is thresholded and steepness/noise-roughened, not a smooth gradient to white. A sparse
-fast-noise sparkle layer adds sun-glitter, gated to only show on already-lit facets.
+**Shading**: colour comes from fake Blinn-Phong lighting off the wave field's *analytical slope* (`core/palette.cpp`),
+not a flat height-to-colour ramp — that's what makes it read as glinting water rather than a heightmap. Foam is
+thresholded and steepness/noise-roughened, not a smooth gradient to white. A sparse fast-noise sparkle layer adds
+sun-glitter, gated to only show on already-lit facets.
+
+**Lighting** (`core/sun_position.{h,cpp}`, `core/sky_state.{h,cpp}`): the light direction isn't fixed — it's the
+*real* sun's position for Mevagissey's coordinates right now (NOAA/Spencer solar position algorithm, pure math, no
+dependency; verified against known equinox/solstice facts — solar-noon elevation and due-south azimuth, ~12h
+equinox day length). Recomputed once per tick (not per pixel) as a small `SkyState`: light sweeps across the sky
+through the day and fades out below the horizon, warmth peaks near dawn/dusk and cools toward both midday and deep
+night, and — when live cloud cover is available — overcast skies dull the glint and flatten the brightness. All
+four states (dawn/day/dusk/night) and both cloud extremes are independently testable today via `--sim-time` and
+`--cloud-cover`, without waiting for real time or weather to cooperate.
 
 **Wave shape**: each component's raw cosine is reshaped into a peaked-crest/broad-trough asymmetry (Gerstner-ish,
 `sampleField` in `core/wave_engine.cpp`) rather than a symmetric sine — steeper components (`amplitude × wavenumber`)

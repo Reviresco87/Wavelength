@@ -5,6 +5,7 @@
 
 #include "field_sample.h"
 #include "palette.h"
+#include "sun_position.h"
 
 namespace wave {
 
@@ -71,6 +72,8 @@ BuoyReading blendReading(const BuoyReading& a, const BuoyReading& b, float t) {
     r.mwdDeg = std::fmod(lerpAngleDeg(a.mwdDeg, b.mwdDeg, t) + 360.0f, 360.0f);
     r.spreadDeg = lerp(a.spreadDeg, b.spreadDeg, t);
     r.seaTempC = lerp(a.seaTempC, b.seaTempC, t);
+    r.cloudCoverPercent = lerp(a.cloudCoverPercent, b.cloudCoverPercent, t);
+    r.cloudCoverPresent = a.cloudCoverPresent || b.cloudCoverPresent;
     r.valid = a.valid || b.valid;
     return r;
 }
@@ -100,8 +103,8 @@ WaveComponent componentFromPartition(const WavePartition& p) {
 
 } // namespace
 
-WaveEngine::WaveEngine(double expectedUpdateIntervalSeconds)
-    : expectedUpdateIntervalSeconds_(expectedUpdateIntervalSeconds) {}
+WaveEngine::WaveEngine(double expectedUpdateIntervalSeconds, double siteLatDeg, double siteLonDeg)
+    : expectedUpdateIntervalSeconds_(expectedUpdateIntervalSeconds), siteLatDeg_(siteLatDeg), siteLonDeg_(siteLonDeg) {}
 
 std::array<WaveComponent, kComponentCount> WaveEngine::deriveComponents(const BuoyReading& reading) {
     std::array<WaveComponent, kComponentCount> specs{};
@@ -193,9 +196,15 @@ void WaveEngine::ingest(const BuoyReading& reading, double nowSeconds) {
     lastIngestTime_ = nowSeconds;
 }
 
-void WaveEngine::tick(double nowSeconds) {
+void WaveEngine::tick(double nowSeconds, int64_t wallClockUnixSeconds) {
+    SunPosition sun = solarPosition(siteLatDeg_, siteLonDeg_, wallClockUnixSeconds);
+
     if (!everIngested_) {
         lastTickTime_ = nowSeconds;
+        // current_ is still default-constructed (no cloud data) here, which
+        // is correct -- before any reading has ever arrived, sun position
+        // alone drives the sky, same as it will once cloud data exists.
+        currentSky_ = deriveSkyState(sun, current_.cloudCoverPercent, current_.cloudCoverPresent);
         return;
     }
 
@@ -221,6 +230,11 @@ void WaveEngine::tick(double nowSeconds) {
         double decayWindow = std::max(expectedUpdateIntervalSeconds_ * 1.5, 1.0);
         confidence_ = static_cast<float>(std::max(0.0, 1.0 - (sinceLast - staleAt) / decayWindow));
     }
+
+    // Computed from the freshly-updated current_ above, not the previous
+    // tick's value -- a new reading's cloud-cover data (or an override)
+    // must be visible in this same tick, not one tick late.
+    currentSky_ = deriveSkyState(sun, current_.cloudCoverPercent, current_.cloudCoverPresent);
 }
 
 FieldSample WaveEngine::sampleField(int x, int y) const {
@@ -318,7 +332,7 @@ FieldSample WaveEngine::sampleField(int x, int y) const {
 void WaveEngine::renderFrame(Grid<RGB8>& out) const {
     for (int y = 0; y < kGridSize; ++y) {
         for (int x = 0; x < kGridSize; ++x) {
-            out.at(x, y) = colorize(sampleField(x, y), confidence_);
+            out.at(x, y) = colorize(sampleField(x, y), confidence_, currentSky_);
         }
     }
 }

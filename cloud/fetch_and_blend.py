@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fetches Copernicus's NW Shelf wave model (Mevagissey's grid cell -- real
-partitioned wind-sea/swell data) and Looe Bay's live CCO buoy reading,
-reconciles them, and writes a small JSON payload matching the extended
-BuoyReading shape from core/buoy_reading.h + core/wave_partition.h.
+partitioned wind-sea/swell data), Looe Bay's live CCO buoy reading, and
+Open-Meteo's live cloud cover, reconciles them, and writes a small JSON
+payload matching the extended BuoyReading shape from core/buoy_reading.h +
+core/wave_partition.h.
 
 Credentials come from environment variables only, never from this file:
   COPERNICUSMARINE_SERVICE_USERNAME / COPERNICUSMARINE_SERVICE_PASSWORD
@@ -121,6 +122,29 @@ def fetch_looe_bay():
     return None  # sensor not present in this response
 
 
+def fetch_cloud_cover():
+    """Returns cloud cover percent (0-100) or None on any failure. Open-Meteo
+    is free, keyless, no signup -- verified this session against the real
+    endpoint: current.cloud_cover is a plain 0-100 number, current.time is
+    ISO8601, update interval ~900s (well inside our 30min cadence)."""
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": MEVAGISSEY_LAT,
+                "longitude": MEVAGISSEY_LON,
+                "current": "cloud_cover",
+                "timezone": "UTC",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return float(resp.json()["current"]["cloud_cover"])
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad: degrade, don't crash the job
+        print(f"Open-Meteo cloud cover fetch failed, continuing without it: {exc}", file=sys.stderr)
+        return None
+
+
 def build_partition(hs, tp, direction):
     if hs is None or tp is None or direction is None or hs < PARTITION_HS_FLOOR_METRES:
         return {"present": False}
@@ -154,6 +178,7 @@ def reconcile(copernicus, live_hs):
 def main():
     looe_bay = fetch_looe_bay()
     copernicus = fetch_copernicus_point()
+    cloud_cover = fetch_cloud_cover()
 
     if looe_bay is None and copernicus is None:
         print("Both Copernicus and Looe Bay fetches failed -- nothing to publish this cycle.", file=sys.stderr)
@@ -175,11 +200,14 @@ def main():
         "windSea": partitions["windSea"],
         "primarySwell": partitions["primarySwell"],
         "secondarySwell": partitions["secondarySwell"],
+        "cloudCoverPercent": cloud_cover if cloud_cover is not None else 0.0,
+        "cloudCoverPresent": cloud_cover is not None,
         "valid": True,
         "generatedAtUnix": int(datetime.now(timezone.utc).timestamp()),
         "sources": {
             "looeBayOk": looe_bay is not None,
             "copernicusOk": copernicus is not None,
+            "cloudCoverOk": cloud_cover is not None,
         },
     }
 
@@ -189,7 +217,8 @@ def main():
 
     print(
         f"Wrote {out_path}: Hs={payload['hsMetres']:.2f}m Tp={payload['tpSeconds']:.2f}s "
-        f"MWD={payload['mwdDeg']:.0f} looeBayOk={looe_bay is not None} copernicusOk={copernicus is not None}"
+        f"MWD={payload['mwdDeg']:.0f} looeBayOk={looe_bay is not None} copernicusOk={copernicus is not None} "
+        f"cloudCoverOk={cloud_cover is not None}"
     )
 
 

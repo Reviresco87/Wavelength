@@ -27,6 +27,9 @@ struct BuoyReading {
     WavePartition primarySwell;
     WavePartition secondarySwell;
 
+    float cloudCoverPercent = 0.0f; // 0-100; only meaningful when cloudCoverPresent
+    bool cloudCoverPresent = false;
+
     bool valid = false;
 };
 

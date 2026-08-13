@@ -45,6 +45,12 @@ BuoyReading LiveFeedClient::parsePayload(const std::string& json) {
     reading.primarySwell = parsePartition(doc["primarySwell"]);
     reading.secondarySwell = parsePartition(doc["secondarySwell"]);
 
+    if (doc["cloudCoverPresent"].is<bool>() && doc["cloudCoverPresent"].as<bool>() &&
+        doc["cloudCoverPercent"].is<float>()) {
+        reading.cloudCoverPercent = doc["cloudCoverPercent"].as<float>();
+        reading.cloudCoverPresent = true;
+    }
+
     reading.valid = true;
     return reading;
 }
