@@ -40,11 +40,9 @@ FeatureCollection) — confirmed working against live data for both Looe Bay and
 (the bulk/height codes are; the convention-inferred ones are flagged in `cloud/fetch_and_blend.py` — verify against
 a real response the first time this runs with credentials).
 
-**Known outstanding issue**: the CCO API key currently returns `403 Referer does not match the key` even when sent
-with the exact registered domain (`wavelength-artwork.local`) as a properly-formed Referer header — verified this
-isn't a client-side formatting problem (tested via both a browser and Python `requests`, with a correctly-parsed
-Referer confirmed in the error response itself). Worth checking the key's actual registered domain in CCO's system
-before relying on it.
+The original CCO API key returned `403 Referer does not match the key` despite being registered for exactly the
+Referer sent — a CCO-side account issue, not a client bug, confirmed working as intended once CCO issued a
+replacement key (2026-08-14).
 
 ## Local weather
 
@@ -95,20 +93,54 @@ and drift. Ctrl+C to quit.
 ./preview_native --stats                             # headless: prints eased state + confidence each tick
 ./preview_native --interval 20                        # change the mock feed's cadence (seconds)
 ./preview_native --live-url <url> [--live-poll-interval 60]   # poll a published blended-JSON payload instead of the mock feed
+./preview_native --scenario scenarios/storm.json      # load a fixed local sea state instead of the mock feed or live URL
 ./preview_native --sim-time 2026-08-13T05:30:00Z      # override the wall clock used for sun position (dawn/day/dusk/night, testable on demand)
 ./preview_native --cloud-cover 100                    # force cloud cover regardless of the feed, to test overcast dulling
 ```
 
-`--live-url` is how the real Copernicus+Looe Bay blend gets seen and judged before any ESP32 hardware exists —
-point it at the raw URL of whatever `cloud/fetch_and_blend.py` publishes.
+`--live-url` is how the real Copernicus+Looe Bay blend gets seen and judged before any ESP32 hardware exists. It's
+now genuinely live:
+
+```
+./preview_native --live-url https://raw.githubusercontent.com/Reviresco87/Wavelength/data/latest.json
+```
+
+## Preview scenarios
+
+`--scenario <path>` loads a local JSON file in the same schema `cloud/fetch_and_blend.py` publishes (see
+`data/live_feed_client.h`) instead of the mock feed or a live URL — useful for seeing sea states, weather, and times
+of day that aren't whatever happens to be live right now. The file is re-read every 2s, so editing it updates the
+running preview without a restart. Mutually exclusive with `--live-url`.
+
+`scenarios/` has a few genuinely different starting points:
+
+- `flat_calm.json` — Hs 0.08m, short period, wide spread: a near-flat day, fine wind-ripple texture only.
+- `crossed_swell.json` — two comparable-energy swells 245°/35° apart, narrow spread each: two clearly distinct
+  diagonal wave-crest bands, not one dominant direction.
+- `storm.json` — Hs 3.5m across wind-sea + primary + secondary swell, wide spread: big steep crests, heavy foam,
+  strong glint.
+- `long_groundswell.json` — Hs 1.4m, 17s period, very narrow spread: a clean, long-travelled single swell.
+- `choppy_wind.json` — Hs 0.65m, 3.2s period, wide spread, wind-sea only: short, disorganised local chop.
+
+Combine freely with `--sim-time` and `--cloud-cover` to see any sea state at any time of day under any weather,
+independently of what's actually happening in Cornwall right now:
+
+```
+./preview_native --scenario scenarios/storm.json --sim-time 2026-08-13T18:30:00Z --cloud-cover 80
+```
 
 ## Cloud data layer
 
-`cloud/fetch_and_blend.py` needs three secrets (GitHub Actions repo secrets when running via
-`.github/workflows/fetch-wave-data.yml`; a gitignored `cloud/.env` for local testing): `CCO_API_KEY`,
-`COPERNICUSMARINE_SERVICE_USERNAME`, `COPERNICUSMARINE_SERVICE_PASSWORD` (a free account at marine.copernicus.eu —
-self-service, not something that can be created on your behalf). The workflow runs every 30 minutes and commits the
-output JSON to a `data` branch; it's inert until this repo is actually pushed to GitHub.
+`cloud/fetch_and_blend.py` needs three secrets (GitHub Actions repo secrets — already set on this repo; a
+gitignored `cloud/.env` for local testing): `CCO_API_KEY`, `COPERNICUSMARINE_SERVICE_USERNAME`,
+`COPERNICUSMARINE_SERVICE_PASSWORD` (a free account at marine.copernicus.eu — self-service, not something that
+can be created on your behalf).
+
+**This is live**: [`.github/workflows/fetch-wave-data.yml`](.github/workflows/fetch-wave-data.yml) runs every 30
+minutes on GitHub's infrastructure and commits the output JSON to the `data` branch, published at the raw URL
+above. The repo is public (a deliberate choice — a private repo can't serve `raw.githubusercontent.com` content
+without auth, and GitHub Pages on a private repo needs a paid plan) — the only things this exposes are the source
+code and this README; the three credentials stay in GitHub Actions secrets, never in the repo itself.
 
 ## Engine design (the "living" part)
 
@@ -118,10 +150,19 @@ across 0°/360°). Between readings, wave-component phases keep advancing contin
 the next update arrives — that continuous motion, not the update itself, is what makes it look alive. If updates
 stop arriving, confidence decays and noise/desaturation grows — the piece reads as "losing certainty," not frozen.
 
-**Wave components**: when a reading carries real partitions (Copernicus), `deriveComponents` builds components
-directly from each real wave train (its own real direction/period/amplitude) rather than faking directionality —
-`core/wave_partition.h`. When it doesn't (mock feed, bulk-only CCO fallback), it falls back to synthesizing a primary
-plus jittered secondaries from one bulk reading's spread — the original Phase A approach, unchanged and still exact.
+**Wave components**: `deriveComponents` (`core/wave_engine.cpp`) doesn't hand-jitter a primary/secondary split —
+`core/wave_spectrum.h`/`.cpp` samples `kComponentCount` (16) discrete components from a real JONSWAP frequency
+spectrum (Hasselmann et al. 1973) and a Longuet-Higgins cos²s directional spreading function (spread-to-s per Kuik
+et al. 1988), the classical "linear random wave" technique for synthesizing a sea state from summary statistics
+(Hs/Tp/direction/spread) — confirmed against real production code in the
+[wavespectra](https://github.com/wavespectra/wavespectra) library, not just a description of the maths. When a
+reading carries real partitions (Copernicus), the 16-component budget is split across present wave trains
+proportional to energy (`hs²`) via largest-remainder apportionment, and each partition is sampled from its own
+spectrum — `core/wave_partition.h`. When it doesn't (mock feed, bulk-only CCO fallback), all 16 components are
+sampled from one spectrum built off the bulk reading. Every sampled set of components is rescaled so its own implied
+Hs (`4·sqrt(Σ amplitude²/2)`) reconstructs the source reading's Hs exactly — a concrete fidelity guarantee, not just
+a visual impression, and it's why the grid is always centred exactly on the reading's own reported period and
+direction rather than sampled from an arbitrary spread around it.
 
 **Shading**: colour comes from fake Blinn-Phong lighting off the wave field's *analytical slope* (`core/palette.cpp`),
 not a flat height-to-colour ramp — that's what makes it read as glinting water rather than a heightmap. Foam is
