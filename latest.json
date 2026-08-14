@@ -9,17 +9,17 @@
   },
   "primarySwell": {
     "hsMetres": 0.3,
-    "tpSeconds": 6.939999844878912,
-    "dirDeg": 191.0000028461218,
+    "tpSeconds": 7.059999842196703,
+    "dirDeg": 189.8000028282404,
     "present": true
   },
   "secondarySwell": {
     "present": false
   },
-  "cloudCoverPercent": 89.0,
+  "cloudCoverPercent": 90.0,
   "cloudCoverPresent": true,
   "valid": true,
-  "generatedAtUnix": 1786746410,
+  "generatedAtUnix": 1786747955,
   "sources": {
     "looeBayOk": true,
     "copernicusOk": true,
