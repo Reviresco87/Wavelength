@@ -5,7 +5,9 @@
 #include <cstring>
 #include <csignal>
 #include <ctime>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -47,6 +49,20 @@ size_t curlWriteCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
     return size * nmemb;
 }
 
+// Local scenario files are read on a short, fixed poll interval (not exposed
+// as a flag -- disk reads are cheap, unlike --live-url's network calls) so
+// editing a scenario file updates the running preview without a restart.
+constexpr double kScenarioPollIntervalSeconds = 2.0;
+
+bool readFile(const std::string& path, std::string& outBody) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    outBody = ss.str();
+    return true;
+}
+
 // Blocking GET, good enough for a preview polling every tens of seconds.
 bool httpGet(const std::string& url, std::string& outBody) {
     CURL* curl = curl_easy_init();
@@ -75,6 +91,7 @@ int main(int argc, char** argv) {
     double mockInterval = 45.0;
     std::string liveUrl;
     double liveIntervalSeconds = 60.0;
+    std::string scenarioPath;
     int64_t simTimeStartUnix = -1;
     bool cloudCoverOverridePresent = false;
     float cloudCoverOverridePercent = 0.0f;
@@ -88,6 +105,8 @@ int main(int argc, char** argv) {
             liveUrl = argv[++i];
         } else if (std::strcmp(argv[i], "--live-poll-interval") == 0 && i + 1 < argc) {
             liveIntervalSeconds = std::atof(argv[++i]);
+        } else if (std::strcmp(argv[i], "--scenario") == 0 && i + 1 < argc) {
+            scenarioPath = argv[++i];
         } else if (std::strcmp(argv[i], "--sim-time") == 0 && i + 1 < argc) {
             simTimeStartUnix = parseIso8601Utc(argv[++i]);
             if (simTimeStartUnix < 0) {
@@ -100,14 +119,21 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!liveUrl.empty() && !scenarioPath.empty()) {
+        std::fprintf(stderr, "--live-url and --scenario are mutually exclusive -- pick one feed.\n");
+        return 1;
+    }
+
     std::signal(SIGINT, handleSigint);
 
     const bool liveMode = !liveUrl.empty();
+    const bool scenarioMode = !scenarioPath.empty();
     // Expected-update-interval drives staleness/confidence decay -- match it
     // to whichever cadence is actually in play so that mechanism means the
-    // same thing in both modes.
-    wave::WaveEngine engine(liveMode ? liveIntervalSeconds : mockInterval);
-    wave::MockBuoyFeed feed(mockInterval); // unused in live mode, harmless
+    // same thing across modes. A scenario file is re-read often enough
+    // (kScenarioPollIntervalSeconds) that it never reads as stale either.
+    wave::WaveEngine engine((liveMode || scenarioMode) ? liveIntervalSeconds : mockInterval);
+    wave::MockBuoyFeed feed(mockInterval); // unused outside mock mode, harmless
     wave::Grid<wave::RGB8> frame;
 
     if (liveMode) {
@@ -126,6 +152,11 @@ int main(int argc, char** argv) {
                 "Living Wave Artwork -- terminal preview (live: %s, polling every %.0fs).\n"
                 "Widen your terminal to ~130 columns. Ctrl+C to quit.\n\n",
                 liveUrl.c_str(), liveIntervalSeconds);
+        } else if (scenarioMode) {
+            std::printf(
+                "Living Wave Artwork -- terminal preview (scenario: %s, re-read every %.0fs).\n"
+                "Widen your terminal to ~130 columns. Ctrl+C to quit.\n\n",
+                scenarioPath.c_str(), kScenarioPollIntervalSeconds);
         } else {
             std::printf(
                 "Living Wave Artwork -- terminal preview (mock feed, %.0fs cadence).\n"
@@ -139,6 +170,7 @@ int main(int argc, char** argv) {
     double t0 = nowSeconds();
     double nextFrameAt = 0.0;
     double nextLivePollAt = 0.0;
+    double nextScenarioPollAt = 0.0;
 
     while (gRunning) {
         double t = nowSeconds() - t0;
@@ -161,6 +193,25 @@ int main(int argc, char** argv) {
                     }
                 } else if (statsMode) {
                     std::printf("t=%6.1fs  live fetch failed (network/HTTP error)\n", t);
+                }
+            }
+        } else if (scenarioMode) {
+            if (t >= nextScenarioPollAt) {
+                nextScenarioPollAt = t + kScenarioPollIntervalSeconds;
+                std::string body;
+                if (readFile(scenarioPath, body)) {
+                    wave::BuoyReading reading = wave::LiveFeedClient::parsePayload(body);
+                    if (reading.valid) {
+                        if (cloudCoverOverridePresent) {
+                            reading.cloudCoverPercent = cloudCoverOverridePercent;
+                            reading.cloudCoverPresent = true;
+                        }
+                        engine.ingest(reading, t);
+                    } else if (statsMode) {
+                        std::printf("t=%6.1fs  scenario file read OK but payload failed to parse\n", t);
+                    }
+                } else if (statsMode) {
+                    std::printf("t=%6.1fs  scenario file read failed: %s\n", t, scenarioPath.c_str());
                 }
             }
         } else {
@@ -197,10 +248,10 @@ int main(int argc, char** argv) {
                                   s.hsMetres, s.tpSeconds, s.mwdDeg, engine.confidence() * 100.0f,
                                   sky.sunElevationDeg);
                 } else {
-                    std::snprintf(status, sizeof(status),
-                                  liveMode ? "waiting for first live fetch...  |  sun %.0f\xC2\xB0"
-                                           : "waiting for first mock reading...  |  sun %.0f\xC2\xB0",
-                                  sky.sunElevationDeg);
+                    const char* waitingLabel = liveMode      ? "waiting for first live fetch..."
+                                                : scenarioMode ? "waiting for first scenario read..."
+                                                               : "waiting for first mock reading...";
+                    std::snprintf(status, sizeof(status), "%s  |  sun %.0f\xC2\xB0", waitingLabel, sky.sunElevationDeg);
                 }
                 renderer->draw(frame, status);
             }

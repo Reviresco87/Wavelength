@@ -10,3 +10,4 @@ cloud/*.pyc
 test_gerstner_shape
 test_cco_client
 .preview-serve/
+/latest.json

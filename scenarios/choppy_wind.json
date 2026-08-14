@@ -1,0 +1,11 @@
+{
+  "hsMetres": 0.65,
+  "tpSeconds": 3.2,
+  "mwdDeg": 90.0,
+  "spreadDeg": 48.0,
+  "seaTempC": 16.0,
+  "windSea": { "hsMetres": 0.65, "tpSeconds": 3.2, "dirDeg": 90.0, "present": true },
+  "primarySwell": { "present": false },
+  "secondarySwell": { "present": false },
+  "cloudCoverPresent": false
+}

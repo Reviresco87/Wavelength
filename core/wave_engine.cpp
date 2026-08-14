@@ -6,40 +6,18 @@
 #include "field_sample.h"
 #include "palette.h"
 #include "sun_position.h"
+#include "wave_spectrum.h"
 
 namespace wave {
 
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
-constexpr float kDegToRad = kPi / 180.0f;
-
-// How each derived component's direction/period/amplitude relates to the
-// primary reading -- fixed per slot index so identity is stable across
-// ingests (slot 0 is always "the primary", slot 1 always "+0.5 spread", etc.),
-// which lets prev/target blending match components up by index.
-constexpr float kSpreadFractions[kComponentCount] = {0.0f, 0.5f, -0.5f, 1.0f, -1.0f};
-constexpr float kAmplitudeWeights[kComponentCount] = {1.0f, 0.55f, 0.55f, 0.30f, 0.30f};
-constexpr float kPeriodJitter[kComponentCount] = {1.0f, 1.08f, 0.93f, 1.15f, 0.88f};
-constexpr float kWeightSum = 1.0f + 0.55f + 0.55f + 0.30f + 0.30f;
 
 // How much of the buoy's reported Hs becomes on-screen amplitude. Tuned so
 // a typical sheltered-bay sea (Hs ~1-2m) sits comfortably mid-ramp and a
 // storm (Hs ~4-5m+) reads as maxed-out/clipped, which is the right feel.
 constexpr float kArtisticAmplitudeScale = 0.65f;
-
-// Real wavelength (deep-water dispersion, lambda = 1.56 * T^2) doesn't fit a
-// 64px panel -- a 20s groundswell is 600+ metres. Rescale the plausible
-// period range onto a chosen on-screen wavelength range instead of trying
-// to be physically-to-scale.
-float wavelengthFromPeriod(float periodSeconds) {
-    float physicalMetres = 1.56f * periodSeconds * periodSeconds;
-    constexpr float physicalMin = 1.56f * 3.0f * 3.0f;
-    constexpr float physicalMax = 1.56f * 20.0f * 20.0f;
-    float t = (physicalMetres - physicalMin) / (physicalMax - physicalMin);
-    t = std::max(0.0f, std::min(1.0f, t));
-    return 6.0f + t * (40.0f - 6.0f);
-}
 
 float clamp01(float v) { return std::max(0.0f, std::min(1.0f, v)); }
 
@@ -87,20 +65,6 @@ WaveComponent blendSpec(const WaveComponent& a, const WaveComponent& b, float t)
     return s;
 }
 
-// Builds one component directly from a real, physically-distinct wave train
-// (e.g. Copernicus's primary swell or wind-sea partition) -- no jitter, this
-// train's own reported height/period/direction are used as-is.
-WaveComponent componentFromPartition(const WavePartition& p) {
-    WaveComponent c;
-    float periodS = std::max(0.5f, p.tpSeconds);
-    float travelBearingDeg = std::fmod(p.dirDeg + 180.0f + 360.0f, 360.0f);
-    c.amplitude = p.hsMetres * kArtisticAmplitudeScale;
-    c.wavelengthPx = wavelengthFromPeriod(periodS);
-    c.directionRad = travelBearingDeg * kDegToRad;
-    c.angularFreq = 2.0f * kPi / periodS;
-    return c;
-}
-
 } // namespace
 
 WaveEngine::WaveEngine(double expectedUpdateIntervalSeconds, double siteLatDeg, double siteLonDeg)
@@ -118,56 +82,63 @@ std::array<WaveComponent, kComponentCount> WaveEngine::deriveComponents(const Bu
 
     if (presentCount == 0) {
         // Bulk-only fallback (mock feed, or a source without real spectral
-        // partitions): exactly the original spread-jitter derivation from a
-        // single bulk reading -- unchanged, so existing verified transition/
-        // wrap/staleness behaviour carries over with zero regression risk.
-        float baseAmplitude = reading.hsMetres * kArtisticAmplitudeScale;
-        float travelBearingDeg = std::fmod(reading.mwdDeg + 180.0f + 360.0f, 360.0f);
-        for (int i = 0; i < kComponentCount; ++i) {
-            float dirDeg = std::fmod(travelBearingDeg + kSpreadFractions[i] * reading.spreadDeg + 360.0f, 360.0f);
-            float periodS = std::max(0.5f, reading.tpSeconds * kPeriodJitter[i]);
-            specs[i].amplitude = baseAmplitude * (kAmplitudeWeights[i] / kWeightSum);
-            specs[i].wavelengthPx = wavelengthFromPeriod(periodS);
-            specs[i].directionRad = dirDeg * kDegToRad;
-            specs[i].angularFreq = 2.0f * kPi / periodS;
-        }
+        // partitions): sample the full component budget from one spectrum
+        // built off the bulk reading.
+        sampleSpectrumComponents(reading.hsMetres, reading.tpSeconds, reading.mwdDeg, reading.spreadDeg, specs.data(),
+                                  0, kComponentCount, kArtisticAmplitudeScale);
         return specs;
     }
 
-    // Real partitioned data: one component slot per real wave train, taken
-    // directly rather than jittered -- we're no longer faking directionality
-    // we now genuinely have.
-    int slot = 0;
-    for (int i = 0; i < presentCount && slot < kComponentCount; ++i, ++slot) {
-        specs[slot] = componentFromPartition(*present[i]);
+    // Split the component budget across present partitions proportional to
+    // energy share (hs^2, since spectral energy scales with height squared)
+    // via largest-remainder apportionment, with a 1-slot floor per present
+    // partition so a real-but-minor wind-sea train is never silently
+    // dropped to zero representation.
+    float energy[3] = {};
+    float energySum = 0.0f;
+    for (int i = 0; i < presentCount; ++i) {
+        energy[i] = present[i]->hsMetres * present[i]->hsMetres;
+        energySum += energy[i];
     }
 
-    // Fill any remaining slots with small texture-only jitter around the
-    // dominant (largest Hs) real train -- same trick the bulk path uses,
-    // just kept subtle (1/4 amplitude) since it's texture on top of real
-    // data, not standing in for missing directional information.
-    if (slot < kComponentCount) {
-        const WavePartition* dominant = present[0];
+    int slots[3] = {};
+    float remainder[3] = {};
+    int assigned = 0;
+    for (int i = 0; i < presentCount; ++i) {
+        float exact = (energySum > 1e-9f) ? (kComponentCount * energy[i] / energySum)
+                                           : (static_cast<float>(kComponentCount) / presentCount);
+        float flo = std::floor(exact);
+        slots[i] = std::max(1, static_cast<int>(flo));
+        remainder[i] = exact - flo;
+        assigned += slots[i];
+    }
+    while (assigned < kComponentCount) {
+        int best = 0;
         for (int i = 1; i < presentCount; ++i) {
-            if (present[i]->hsMetres > dominant->hsMetres) dominant = present[i];
+            if (remainder[i] > remainder[best]) best = i;
         }
-        float dominantTravelBearingDeg = std::fmod(dominant->dirDeg + 180.0f + 360.0f, 360.0f);
-        float dominantAmplitude = dominant->hsMetres * kArtisticAmplitudeScale;
+        ++slots[best];
+        remainder[best] = -1.0f; // don't double-pick within one apportionment pass
+        ++assigned;
+    }
+    while (assigned > kComponentCount) {
+        // Only possible when the 1-slot floor above pushed several minor
+        // partitions up at once; claw back from whichever partition
+        // currently holds the most slots, never below its own floor of 1.
+        int worst = 0;
+        for (int i = 1; i < presentCount; ++i) {
+            if (slots[i] > slots[worst]) worst = i;
+        }
+        if (slots[worst] <= 1) break;
+        --slots[worst];
+        --assigned;
+    }
 
-        constexpr float kTextureJitterDirDeg[] = {12.0f, -12.0f, 22.0f, -22.0f};
-        constexpr float kTextureJitterPeriodMul[] = {1.07f, 0.94f, 1.13f, 0.89f};
-        int j = 0;
-        while (slot < kComponentCount) {
-            int ji = j % 4;
-            float dirDeg = std::fmod(dominantTravelBearingDeg + kTextureJitterDirDeg[ji] + 360.0f, 360.0f);
-            float periodS = std::max(0.5f, dominant->tpSeconds * kTextureJitterPeriodMul[ji]);
-            specs[slot].amplitude = dominantAmplitude * 0.25f;
-            specs[slot].wavelengthPx = wavelengthFromPeriod(periodS);
-            specs[slot].directionRad = dirDeg * kDegToRad;
-            specs[slot].angularFreq = 2.0f * kPi / periodS;
-            ++slot;
-            ++j;
-        }
+    int startSlot = 0;
+    for (int i = 0; i < presentCount; ++i) {
+        sampleSpectrumComponents(present[i]->hsMetres, present[i]->tpSeconds, present[i]->dirDeg, reading.spreadDeg,
+                                  specs.data(), startSlot, slots[i], kArtisticAmplitudeScale);
+        startSlot += slots[i];
     }
 
     return specs;
