@@ -19,10 +19,10 @@
   "secondarySwell": {
     "present": false
   },
-  "cloudCoverPercent": 65.0,
+  "cloudCoverPercent": 91.0,
   "cloudCoverPresent": true,
   "valid": true,
-  "generatedAtUnix": 1786768528,
+  "generatedAtUnix": 1786771703,
   "sources": {
     "looeBayOk": false,
     "copernicusOk": true,
