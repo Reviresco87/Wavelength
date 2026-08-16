@@ -8,21 +8,21 @@
     "present": false
   },
   "primarySwell": {
-    "hsMetres": 0.15141212556777964,
-    "tpSeconds": 5.0599998869001865,
-    "dirDeg": 100.80000150203705,
+    "hsMetres": 0.14695481511123573,
+    "tpSeconds": 5.019999887794256,
+    "dirDeg": 103.90000154823065,
     "present": true
   },
   "secondarySwell": {
-    "hsMetres": 0.09733636643642976,
-    "tpSeconds": 6.069999864324927,
-    "dirDeg": 195.90000291913748,
+    "hsMetres": 0.10394364971282527,
+    "tpSeconds": 6.129999862983823,
+    "dirDeg": 194.1000028923154,
     "present": true
   },
-  "cloudCoverPercent": 83.0,
+  "cloudCoverPercent": 97.0,
   "cloudCoverPresent": true,
   "valid": true,
-  "generatedAtUnix": 1786922608,
+  "generatedAtUnix": 1786924032,
   "sources": {
     "looeBayOk": true,
     "copernicusOk": true,
