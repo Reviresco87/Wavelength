@@ -1,28 +1,28 @@
 {
-  "hsMetres": 1.45,
-  "tpSeconds": 10.53,
-  "mwdDeg": 220.8,
-  "spreadDeg": 12.8,
-  "seaTempC": 15.2,
+  "hsMetres": 1.44,
+  "tpSeconds": 9.09,
+  "mwdDeg": 212.3,
+  "spreadDeg": 15.6,
+  "seaTempC": 15.35,
   "windSea": {
-    "hsMetres": 0.5982108823280738,
-    "tpSeconds": 1.6899999622255564,
-    "dirDeg": 295.50000440329313,
+    "hsMetres": 0.17520472261014977,
+    "tpSeconds": 1.7099999617785215,
+    "dirDeg": 245.0000036507845,
     "present": true
   },
   "primarySwell": {
-    "hsMetres": 1.320849628180387,
-    "tpSeconds": 8.32999981380999,
-    "dirDeg": 188.90000281482935,
+    "hsMetres": 1.4293016844512219,
+    "tpSeconds": 8.47999981045723,
+    "dirDeg": 186.1000027731061,
     "present": true
   },
   "secondarySwell": {
     "present": false
   },
-  "cloudCoverPercent": 2.0,
+  "cloudCoverPercent": 100.0,
   "cloudCoverPresent": true,
   "valid": true,
-  "generatedAtUnix": 1792938693,
+  "generatedAtUnix": 1792950562,
   "sources": {
     "looeBayOk": true,
     "copernicusOk": true,
